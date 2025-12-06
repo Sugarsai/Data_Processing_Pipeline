@@ -16,7 +16,7 @@ parser.add_argument("input_file", help="Path to input CSV or JSON file")
 parser.add_argument("--group_by", default="region", help="Column to group by for aggregation")
 parser.add_argument("--value", default="sales", help="Numeric value column to process")
 parser.add_argument("--date", default="date", help="Date column to parse")
-parser.add_argument("--threshold", type=float, default=700.0, help="Filter threshold for value > this")
+parser.add_argument("--threshold", type=float, default=0, help="Filter threshold for value > this")
 parser.add_argument("--output", default="processed_data.csv", help="Output CSV file")
 args = parser.parse_args()
 
@@ -34,8 +34,8 @@ def load_data(file_path):
     else:
         raise ValueError("Unsupported file format. Use CSV or JSON.")
 
-# Impute missing values 
-def impute_missing(data, value_col, group_by_col, date_col):
+# Compute imputation values
+def compute_imputation_values(data, value_col, group_by_col, date_col):
     # Numerical: compute mean from non-missing
     num_values = [float(row[value_col]) for row in data if value_col in row and row[value_col] not in (None, '', '0')]
     num_mean = statistics.mean(num_values) if num_values else 0.0
@@ -48,26 +48,30 @@ def impute_missing(data, value_col, group_by_col, date_col):
     date_values = [row[date_col] for row in data if date_col in row and row[date_col] not in (None, '')]
     date_mode = statistics.mode(date_values) if date_values else None
     
-    # Impute
-    for row in data:
-        if value_col not in row or row[value_col] in (None, ''):
-            row[value_col] = round(num_mean, 2)
-        if group_by_col not in row or row[group_by_col] in (None, ''):
-            row[group_by_col] = cat_mode
-        if date_col not in row or row[date_col] in (None, '') and date_mode:
-            row[date_col] = date_mode
-    
-    return data
+    return num_mean, cat_mode, date_mode
+
+# Impute missing values
+def impute_missing(data, value_col, group_by_col, date_col):
+    num_mean, cat_mode, date_mode = compute_imputation_values(data, value_col, group_by_col, date_col)
+    def impute_row(row):
+        new_row = dict(row)
+        if value_col not in new_row or new_row[value_col] in (None, ''):
+            new_row[value_col] = round(num_mean, 2)
+        if group_by_col not in new_row or new_row[group_by_col] in (None, ''):
+            new_row[group_by_col] = cat_mode
+        if date_col not in new_row or new_row[date_col] in (None, '') and date_mode:
+            new_row[date_col] = date_mode
+        return new_row
+    return [impute_row(row) for row in data]
 
 # Function: Standardize numerical to float
 def standardize_value(row, value_col):
     try:
         return {**row, value_col: round(float(row[value_col]), 2)}
     except ValueError:
-        logging.warning(f"Invalid value after imputation: {row[value_col]}")
         return None
 
-# Function: Standardize categorical (ensure str, strip whitespace)
+# Function: Standardize categorical
 def standardize_categorical(row, cat_col):
     val = row.get(cat_col, 'Unknown')
     return {**row, cat_col: str(val).strip()}
@@ -83,7 +87,6 @@ def parse_date(row, date_col):
             return {**row, date_col: parsed.strftime('%Y-%m-%d')}
         except ValueError:
             pass
-    logging.warning(f"Invalid date format for: {row[date_col]}")
     return None
 
 # Function: Filter value > threshold
@@ -92,48 +95,55 @@ def filter_high_value(row, value_col, threshold):
 
 # Function: Aggregate total value per group_by using reduce
 def aggregate_values(data, group_by_col, value_col):
-    def reducer(acc, row):
-        key = row.get(group_by_col, 'Unknown')
-        acc[key] = acc.get(key, 0) + row[value_col]
-        return acc
-    return reduce(reducer, data, {})
+    def get_key(r):
+        return r.get(group_by_col, 'Unknown')
+    sorted_data = sorted(data, key=get_key)
+    grouped = groupby(sorted_data, key=get_key)
+    return {key: sum(row[value_col] for row in group_iter) for key, group_iter in grouped}
 
 # Pipeline: Compose functions
-def process_pipeline(input_data, args):
-    growth_col = f"{args.value}_growth_pct"
+def process_pipeline(input_data, group_by_col, value_col, date_col, threshold):
+    growth_col = f"{value_col}_growth_pct"
     
-    # Impute missing values first
-    imputed = impute_missing(input_data, args.value, args.group_by, args.date)
+    # Impute missing values
+    imputed = impute_missing(input_data, value_col, group_by_col, date_col)
     
     # Standardize value (filter None for invalid)
-    standardized = list(filter(None, (standardize_value(row, args.value) for row in imputed)))
+    standardized = list(filter(None, (standardize_value(row, value_col) for row in imputed)))
     
     # Standardize group_by
-    standardized_group = [standardize_categorical(row, args.group_by) for row in standardized]
+    standardized_group = [standardize_categorical(row, group_by_col) for row in standardized]
     
     # Parse dates (filter None for invalid dates)
-    parsed = list(filter(None, (parse_date(row, args.date) for row in standardized_group)))
+    parsed = list(filter(None, (parse_date(row, date_col) for row in standardized_group)))
     
     # Filter high value
-    filtered = [row for row in parsed if filter_high_value(row, args.value, args.threshold)]
+    filtered = [row for row in parsed if filter_high_value(row, value_col, threshold)]
     
     # Sort by group_by and date for sequential growth
-    if args.date in filtered[0] if filtered else False:  # Check if date present
-        sorted_data = sorted(filtered, key=lambda r: (r[args.group_by], datetime.strptime(r[args.date], '%Y-%m-%d')))
-    else:
-        sorted_data = filtered  # No date, no sort for growth
+    def sort_key(r):
+        try:
+            return (r[group_by_col], datetime.strptime(r[date_col], '%Y-%m-%d'))
+        except (KeyError, ValueError):
+            return (r[group_by_col], datetime.min)  # Fallback for missing/invalid dates
+    
+    sorted_data = sorted(filtered, key=sort_key)
     
     # Compute sequential growth per group
-    processed = []
-    for key, group_iter in groupby(sorted_data, key=lambda r: r[args.group_by]):
-        group = list(group_iter)
-        for i, row in enumerate(group):
-            if i == 0:
+    def compute_growth(group):
+        def growth_reducer(acc, row):
+            prev_val, results = acc
+            if prev_val is None:
                 growth = 0.0
             else:
-                prev_val = group[i-1][args.value]
-                growth = ((row[args.value] - prev_val) / prev_val * 100) if prev_val != 0 else 0.0
-            processed.append({**row, growth_col: round(growth, 2)})
+                growth = ((row[value_col] - prev_val) / prev_val * 100) if prev_val != 0 else 0.0
+            new_row = {**row, growth_col: round(growth, 2)}
+            return (row[value_col], results + [new_row])
+        _, processed_group = reduce(growth_reducer, group, (None, []))
+        return processed_group
+    
+    grouped = groupby(sorted_data, key=lambda r: r[group_by_col])
+    processed = [item for key, group_iter in grouped for item in compute_growth(list(group_iter))]
     
     return processed
 
@@ -155,8 +165,8 @@ def compute_stats(data, value_col, date_col):
     stats = {
         f"mean_{value_col}": statistics.mean(value_list),
         f"median_{value_col}": statistics.median(value_list),
-        f"variance_{value_col}": statistics.variance(value_list),
-        f"stdev_{value_col}": statistics.stdev(value_list),
+        f"variance_{value_col}": statistics.variance(value_list) if len(value_list) > 1 else 0,
+        f"stdev_{value_col}": statistics.stdev(value_list) if len(value_list) > 1 else 0,
         f"min_{value_col}": min(value_list),
         f"max_{value_col}": max(value_list),
     }
@@ -183,48 +193,45 @@ def compute_stats(data, value_col, date_col):
     
     return stats
 
-# Visualization functions (side effects isolated)
-def visualize_aggregates(aggregates, group_by_col, value_col):
+# Visualization functions
+def create_aggregates_bar(aggregates, group_by_col, value_col):
     if not aggregates:
-        return
+        return None
     keys = list(aggregates.keys())
     values = list(aggregates.values())
-    plt.figure(figsize=(10, 6))
-    plt.bar(keys, values)
-    plt.xlabel(group_by_col.capitalize())
-    plt.ylabel(f"Total {value_col.capitalize()}")
-    plt.title(f"Aggregate {value_col.capitalize()} by {group_by_col.capitalize()}")
-    plt.savefig('aggregates_bar.png')
-    plt.close()
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.bar(keys, values)
+    ax.set_xlabel(group_by_col.capitalize())
+    ax.set_ylabel(f"Total {value_col.capitalize()}")
+    ax.set_title(f"Aggregate {value_col.capitalize()} by {group_by_col.capitalize()}")
+    return fig
 
-def visualize_histogram(value_list, value_col):
+def create_histogram(value_list, value_col):
     if not value_list:
-        return
-    plt.figure(figsize=(10, 6))
-    plt.hist(value_list, bins=10, edgecolor='black')
-    plt.xlabel(value_col.capitalize())
-    plt.ylabel('Frequency')
-    plt.title(f"Histogram of {value_col.capitalize()} Values")
-    plt.savefig('value_histogram.png')
-    plt.close()
+        return None
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(value_list, bins=10, edgecolor='black')
+    ax.set_xlabel(value_col.capitalize())
+    ax.set_ylabel('Frequency')
+    ax.set_title(f"Histogram of {value_col.capitalize()} Values")
+    return fig
 
-def visualize_trend(date_aggregates, date_col, value_col):
+def create_trend_line(date_aggregates, date_col, value_col):
     if not date_aggregates:
-        return
+        return None
     keys = sorted(date_aggregates.keys())
     values = [date_aggregates[k] for k in keys]
-    plt.figure(figsize=(10, 6))
-    plt.plot(keys, values, marker='o')
-    plt.xlabel(date_col.capitalize())
-    plt.ylabel(f"Total {value_col.capitalize()}")
-    plt.title(f"Trend of {value_col.capitalize()} Over Time")
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(keys, values, marker='o')
+    ax.set_xlabel(date_col.capitalize())
+    ax.set_ylabel(f"Total {value_col.capitalize()}")
+    ax.set_title(f"Trend of {value_col.capitalize()} Over Time")
     plt.xticks(rotation=45)
-    plt.savefig('trend_line.png')
-    plt.close()
+    return fig
 
 # Main execution
 input_data = load_data(args.input_file)
-processed_data = process_pipeline(input_data, args)
+processed_data = process_pipeline(input_data, args.group_by, args.value, args.date, args.threshold)
 
 if not processed_data:
     print("No data after processing.")
@@ -249,9 +256,21 @@ for key, val in stats.items():
     print(f"{key.capitalize()}: {val}")
 
 # Generate visualizations
-visualize_aggregates(group_aggregates, args.group_by, args.value)
-visualize_histogram(value_list, args.value)
-visualize_trend(date_aggregates, args.date, args.value)
+agg_fig = create_aggregates_bar(group_aggregates, args.group_by, args.value)
+if agg_fig:
+    agg_fig.savefig('aggregates_bar.png')
+    plt.close(agg_fig)
+
+hist_fig = create_histogram(value_list, args.value)
+if hist_fig:
+    hist_fig.savefig('value_histogram.png')
+    plt.close(hist_fig)
+
+trend_fig = create_trend_line(date_aggregates, args.date, args.value)
+if trend_fig:
+    trend_fig.savefig('trend_line.png')
+    plt.close(trend_fig)
+
 print("Visualizations saved as 'aggregates_bar.png', 'value_histogram.png', and 'trend_line.png'")
 
 # Save processed data to CSV
