@@ -2,28 +2,19 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 class DataVisualizer:
-    def __init__(self , transformer):
+    def __init__(self , transformer, analyzer):
         sns.set(style="whitegrid") 
         self.transformer = transformer
+        self.analyzer = analyzer
 
     def bar_chart(self, data, value_col, category_col):
-        """
-        Creates a bar chart of total value per category.
-        """
-        # Aggregate sums per category
-        aggregates = {}
-        for row in data:
-            cat = row.get(category_col, "Unknown")
-            val = row.get(value_col)
-            if val is None:
-                continue
-            aggregates[cat] = aggregates.get(cat, 0) + val
+        aggregates = self.transformer.aggregate(data, category_col, value_col)
 
         if not aggregates:
             print("No data to plot.")
             return None
 
-        fig, ax = plt.subplots(figsize=(10,6))
+        fig, ax = plt.subplots(figsize=(10, 6))
         ax.bar(aggregates.keys(), aggregates.values(), color='skyblue')
         ax.set_xlabel(category_col.capitalize())
         ax.set_ylabel(f"Total {value_col.capitalize()}")
@@ -52,11 +43,9 @@ class DataVisualizer:
         plt.tight_layout()
         return fig
         
-    def correlation_heatmap(self, data, numeric_cols, analyzer):
-        """
-        Plots a correlation heatmap using DataAnalyzer's correlation_matrix.
-        """
-        matrix = analyzer.correlation_matrix(data, numeric_cols)
+    def correlation_heatmap(self, data, numeric_cols):
+        
+        matrix = self.analyzer.correlation_matrix(data, numeric_cols)
 
         if not matrix:
             print("No data to plot correlation.")

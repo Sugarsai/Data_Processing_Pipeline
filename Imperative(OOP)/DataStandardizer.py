@@ -11,10 +11,6 @@ class DataStandardizer :
         ]
 
     def standardize_numeric_column(self, data, column):
-        """
-        Convert all values in the column to float (rounded to 2 decimals).
-        Invalid or missing values become None.
-        """
         for row in data:
             try:
                 row[column] = round(float(row[column]), 2)
@@ -51,21 +47,3 @@ class DataStandardizer :
                 row[column] = None
 
         return data
-        """Parse date into standard '%Y-%m-%d'. If invalid, set None."""
-        raw = row.get(column)
-
-        if not raw:
-            row[column] = None
-            return row
-
-        for fmt in self.date_formats:
-            try:
-                parsed = datetime.strptime(raw, fmt)
-                row[column] = parsed.strftime('%Y-%m-%d')
-                return row
-            except ValueError:
-                continue
-
-        # No format matched
-        row[column] = None
-        return row
