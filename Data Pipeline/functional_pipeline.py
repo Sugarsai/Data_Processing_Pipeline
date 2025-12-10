@@ -34,36 +34,7 @@ def load_data(file_path):
     else:
         raise ValueError("Unsupported file format. Use CSV or JSON.")
 
-# Compute imputation values
-def compute_imputation_values(data, value_col, group_by_col, date_col):
-    # Numerical: compute mean from non-missing
-    num_values = [float(row[value_col]) for row in data if value_col in row and row[value_col] not in (None, '', '0')]
-    num_mean = statistics.mean(num_values) if num_values else 0.0
-    
-    # Categorical: compute mode from non-missing
-    cat_values = [row[group_by_col] for row in data if group_by_col in row and row[group_by_col] not in (None, '')]
-    cat_mode = statistics.mode(cat_values) if cat_values else 'Unknown'
-    
-    # Date: for simplicity, use mode date if available
-    date_values = [row[date_col] for row in data if date_col in row and row[date_col] not in (None, '')]
-    date_mode = statistics.mode(date_values) if date_values else None
-    
-    return num_mean, cat_mode, date_mode
-
-# Impute missing values
-def impute_missing(data, value_col, group_by_col, date_col):
-    num_mean, cat_mode, date_mode = compute_imputation_values(data, value_col, group_by_col, date_col)
-    def impute_row(row):
-        new_row = dict(row)
-        if value_col not in new_row or new_row[value_col] in (None, ''):
-            new_row[value_col] = round(num_mean, 2)
-        if group_by_col not in new_row or new_row[group_by_col] in (None, ''):
-            new_row[group_by_col] = cat_mode
-        if date_col not in new_row or new_row[date_col] in (None, '') and date_mode:
-            new_row[date_col] = date_mode
-        return new_row
-    return [impute_row(row) for row in data]
-
+# haNDLE mising data
 def compute_stat(data, column, method, numeric=False):
     clean = [row[column] for row in data if row.get(column) not in (None, '', '0')]
 
@@ -138,7 +109,6 @@ def process_pipeline(input_data, group_by_col, value_col, date_col, threshold):
     group_by_col: (statistics.mode, False),
     date_col: (statistics.mode, False)
 }
-    #imputed = impute_missing(input_data, value_col, group_by_col, date_col)
     imputed = recursive_impute(input_data, impute_config)
     
     # Standardize value (filter None for invalid)
