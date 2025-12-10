@@ -64,6 +64,33 @@ def impute_missing(data, value_col, group_by_col, date_col):
         return new_row
     return [impute_row(row) for row in data]
 
+def compute_stat(data, column, method, numeric=False):
+    clean = [row[column] for row in data if row.get(column) not in (None, '', '0')]
+
+    if numeric:
+        clean = list(map(float, clean))
+    return method(clean)
+def impute_column(data, column, imputed_value):
+    def impute_row(row):
+        new_row = dict(row)
+        if column not in new_row or new_row[column] in (None, ''):
+            new_row[column] = imputed_value
+        return new_row
+
+    return list(map(impute_row, data))
+def recursive_impute(data, config):
+    if not config:
+        return data
+
+    column, (method, numeric) = next(iter(config.items()))
+    rest_config = dict(list(config.items())[1:])
+
+    stat_value = compute_stat(data, column, method, numeric=numeric)
+    updated_data = impute_column(data, column, stat_value)
+
+    return recursive_impute(updated_data, rest_config)
+
+
 # Function: Standardize numerical to float
 def standardize_value(row, value_col):
     try:
@@ -106,7 +133,13 @@ def process_pipeline(input_data, group_by_col, value_col, date_col, threshold):
     growth_col = f"{value_col}_growth_pct"
     
     # Impute missing values
-    imputed = impute_missing(input_data, value_col, group_by_col, date_col)
+    impute_config = {
+    value_col: (statistics.median, True), 
+    group_by_col: (statistics.mode, False),
+    date_col: (statistics.mode, False)
+}
+    #imputed = impute_missing(input_data, value_col, group_by_col, date_col)
+    imputed = recursive_impute(input_data, impute_config)
     
     # Standardize value (filter None for invalid)
     standardized = list(filter(None, (standardize_value(row, value_col) for row in imputed)))
